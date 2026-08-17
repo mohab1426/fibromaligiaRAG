@@ -79,4 +79,4 @@ with gr.Blocks(title="Fibromyalgia RAG") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(share=True)
