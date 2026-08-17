@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Generated / large artifacts (rebuildable from the notebook)
+data/processed/faiss_index/
+*.faiss
+*.pkl
+
+# Secrets - never commit API keys
+*.key
+.env.local
