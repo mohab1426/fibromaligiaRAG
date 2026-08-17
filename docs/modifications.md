@@ -124,6 +124,32 @@ not on the allowlist). Given that constraint, testing was done in two parts:
    and, optionally, an API key — but you should run the notebook yourself
    once to confirm on your machine.
 
+## 7b. Follow-up: Gradio Web Interface
+
+After the initial audit/delivery, a Gradio-based web UI was added on request:
+
+- `src/pipeline.py` — the notebook's pipeline steps (extraction, cleaning,
+  section parsing, chunking, indexing, retrieval, generation) were
+  refactored into reusable functions so the notebook and the web app share
+  one implementation instead of duplicating logic. `get_retriever()` also
+  adds FAISS index caching to disk (`data/processed/faiss_index/`) so the
+  app doesn't rebuild embeddings on every launch.
+- `src/app.py` — a `gradio.Blocks` app with a question box, an "Ask" button,
+  an answer box, and a markdown panel listing the retrieved source passages
+  (labeled by article section). It reuses `generate_answer()` from
+  `pipeline.py`, so it inherits the same OpenAI/extractive-fallback
+  behavior as the notebook — no API key is required to run it.
+- `requirements.txt` — added `gradio>=4.0`.
+- `README.md` — added a "Web interface (Gradio)" usage section.
+
+Testing: `src/pipeline.py` was exercised end-to-end for extraction, cleaning,
+section parsing, and chunking against the real PDF (70 chunks, correct
+sections) in this sandbox. Both `src/pipeline.py` and `src/app.py` were
+syntax-checked (`ast.parse`). The embedding/indexing step and the live
+Gradio server were not run end-to-end here due to the same
+`huggingface.co` network restriction noted in Section 7 — run
+`python src/app.py` yourself once to confirm on your machine.
+
 ## 8. Remaining Limitations
 
 - The real embedding + OpenAI generation paths could not be executed in this
