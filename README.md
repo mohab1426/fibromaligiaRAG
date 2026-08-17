@@ -73,6 +73,10 @@ project/
 ├── notebooks/
 │   └── fibromyalgia_rag_pipeline.ipynb
 │
+├── src/
+│   ├── pipeline.py         # shared pipeline logic (used by app.py)
+│   └── app.py              # Gradio web interface
+│
 ├── data/
 │   ├── raw/
 │   │   └── biomedicines-12-01543.pdf
@@ -111,6 +115,30 @@ pip install -r requirements.txt
 
    No key is required to run the notebook; without one, Section 8 falls back
    to a template-based answer built directly from the retrieved chunks.
+
+### Web interface (Gradio)
+
+A simple chat-style web UI is available in `src/app.py`, built on top of the
+same pipeline logic used by the notebook (`src/pipeline.py`):
+
+```bash
+python src/app.py
+```
+
+- The first launch builds the FAISS index from the PDF and caches it in
+  `data/processed/faiss_index/` (git-ignored); later launches load the
+  cached index and start instantly.
+- Open the local URL Gradio prints (typically `http://127.0.0.1:7860`).
+- Type a question, hit **Ask**, and you'll get the generated answer plus the
+  retrieved source passages underneath, labeled by article section.
+- Works with or without `OPENAI_API_KEY` set, exactly like the notebook's
+  generation step (Section 8) — the app header shows which mode is active.
+
+To share the interface temporarily (e.g. for a demo), pass `share=True`:
+
+```python
+demo.launch(share=True)  # edit the last line of src/app.py
+```
 
 ## Results
 
