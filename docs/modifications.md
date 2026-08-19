@@ -150,6 +150,77 @@ Gradio server were not run end-to-end here due to the same
 `huggingface.co` network restriction noted in Section 7 — run
 `python src/app.py` yourself once to confirm on your machine.
 
+## 7c. Follow-up: Layout-aware parsing, subsection chunking, optional OpenRouter embeddings
+
+A second team notebook (`fibromyalgia_.ipynb`, 33 cells) prototyped a more
+detailed parsing/chunking approach and an alternate embeddings backend. It
+was **not** added to the repository — its logic was integrated into
+`src/pipeline.py` and the notebook was regenerated to match. Changes:
+
+- **Parsing replaced with layout-aware heading detection.** `extract_lines()`
+  now reads PyMuPDF's `"dict"` output (text + font metadata) instead of
+  plain text. `detect_headings()` identifies H1/H2/H3 headings from a
+  numbering-pattern regex combined with bold/italic formatting, and
+  `build_sections()` slices the line stream between headings into
+  paragraph-level elements carrying page/section/**subsection** metadata.
+  This replaces the previous `parse_sections()`, which matched a fixed list
+  of 7 section-title strings and had no subsection granularity.
+- **Reference-list parsing added.** `parse_references()` parses the
+  bibliography into individually addressable, numbered entries. It's a
+  standalone utility (not wired into chunking/retrieval), preserved because
+  it was part of the notebook's already-working parsing logic.
+- **Chunking replaced with token-based, subsection-grouped chunking.**
+  `chunk_elements()` groups cleaned elements by `(section, subsection)`,
+  splits each group with `RecursiveCharacterTextSplitter` using a
+  `tiktoken`-based token-length function (previously character-based), and
+  recovers each chunk's page number(s) via a character-offset → page map
+  instead of a text search. `filter_meaningful_chunks()` drops low-signal
+  chunks (fewer than 5 tokens, or no meaningful alphabetic content).
+- **OpenRouter embeddings added as an optional backend.** `_build_embeddings()`
+  dispatches on the `EMBEDDING_BACKEND` environment variable: `huggingface`
+  (default, unchanged, no key required) or `openrouter`, which requires
+  `OPENROUTER_API_KEY` to be set. `src/app.py` now shows the active backend
+  alongside the existing generation-mode indicator.
+- **Retrieval evaluation unchanged.** The notebook's `evaluate_retrieval()`
+  logic and 3-question eval set were already identical to the existing
+  implementation; nothing to integrate there.
+- **Answer generation unchanged.** The team notebook had no generation step
+  (it stopped after retrieval, the same gap noted in Problem 2 above); the
+  existing `generate_answer()` was kept as-is.
+
+**Security note:** the uploaded notebook contained a live, hardcoded
+OpenRouter API key in its embeddings cell. It was **not** carried into the
+repository in any form — `OPENROUTER_API_KEY` is read from the environment
+only. The exposed key should be revoked/rotated at
+https://openrouter.ai/keys.
+
+Files touched: `src/pipeline.py` (rewritten), `src/app.py` (one line added
+to display the active embedding backend), `notebooks/fibromyalgia_rag_pipeline.ipynb`
+(regenerated to mirror the new pipeline steps), `requirements.txt` (added
+`tiktoken`), `README.md` (pipeline description, embedding-backend docs,
+Results section updated to not hard-code a chunk count that changed).
+
+Testing: this sandbox has no network access at all (not even PyPI), so none
+of the third-party libraries (`fitz`, `langchain_*`, `tiktoken`, `openai`,
+`faiss`) could be installed or exercised directly. The new parsing/chunking
+logic (`detect_headings`, `build_sections`, `clean_elements`,
+`chunk_elements`, `filter_meaningful_chunks`, `parse_references`'s regex
+core, `is_meaningful_chunk`) was instead verified against synthetic
+line/text fixtures using lightweight stand-ins for `tiktoken` and
+`RecursiveCharacterTextSplitter`, and the `_build_embeddings()` backend
+dispatch was verified against a stubbed `openai` client — confirming
+correct heading levels, section/subsection propagation, page-number
+recovery, chunk_id generation, the meaningful-chunk filter, and that the
+`OPENROUTER_API_KEY` is read only from the environment (a source-level
+check also confirmed no literal key string is present in `pipeline.py`).
+All edited/created files were syntax-checked (`py_compile` for `.py`
+files; the notebook's JSON structure and each code cell's `ast.parse`
+were checked — the `%pip install` magic cell is expected to fail plain
+Python parsing, same as the pre-existing notebook). The real PDF parsing,
+embedding, indexing, and OpenAI/OpenRouter API calls were **not** run
+end-to-end in this sandbox; run the notebook or `src/app.py` yourself once
+on a machine with normal internet access to confirm.
+
 ## 8. Remaining Limitations
 
 - The real embedding + OpenAI generation paths could not be executed in this
@@ -160,3 +231,36 @@ Gradio server were not run end-to-end here due to the same
   generation step — only retrieval quality is scored.
 - The retrieval benchmark is intentionally small (3 questions) and should be
   treated as a smoke test, not a statistically meaningful evaluation.
+- The heading-detection regexes assume the numbering/formatting conventions
+  of this specific article (bold `N.` for H1, italic `N.N.` for H2, plain
+  `N.N.N.` on its own line for H3) and would need adapting for articles with
+  a different heading scheme.
+- Switching `EMBEDDING_BACKEND` changes the vector dimensionality; the
+  cached FAISS index at `data/processed/faiss_index/` must be rebuilt (it is
+  git-ignored, so this is just a local cache concern, not a repo issue).
+- Resolved: the root-level `pipeline.py` and `app.py` duplicates flagged in
+  a previous pass have been removed (see "7d" below). `src/` is now the
+  single source of truth.
+
+## 7d. Follow-up: removed redundant root-level duplicates
+
+`pipeline.py` and `app.py` at the repository root were traced and confirmed
+unused before removal:
+
+- Neither file is imported by anything else in the repo (`src/app.py`
+  inserts `src/` at the front of `sys.path` and imports `pipeline` from
+  there, i.e. `src/pipeline.py` — never the root copy).
+- Neither is referenced by the README's project structure, installation, or
+  usage instructions (`python src/app.py`, notebook imports from
+  `src/pipeline.py`).
+- `pipeline.py` was a byte-for-byte pre-integration snapshot of
+  `src/pipeline.py` (missing all of section 7c's changes above); `app.py`
+  differed from `src/app.py` only in `demo.launch(share=True)` vs.
+  `demo.launch()`.
+- No `.git` history was present in the delivered archive to check for other
+  references; a repo-wide grep for `pipeline.py`, `app.py`, and
+  `import pipeline` found no other call sites.
+
+Given they were provably dead, unreferenced code, they were deleted rather
+than kept as a diverging, unmaintained second copy of the pipeline. `src/`
+is the project's one implementation going forward.

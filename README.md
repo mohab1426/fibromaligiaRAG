@@ -10,18 +10,26 @@ Cueto-Ureña, Ramírez-Expósito & Martínez-Martos, 2024, *Biomedicines* 12(7),
 
 Given the source PDF, the pipeline:
 
-1. Extracts raw text from every page (PyMuPDF).
-2. Cleans the text — de-hyphenates words broken across line breaks, strips
-   the repeated journal header/footer, DOI, and journal URL boilerplate.
-3. Splits the article into its 7 top-level sections (Introduction,
-   Epidemiology, Physiopathology, Etiopathogenesis, Diagnosis, Treatment,
-   Conclusions).
-4. Chunks each section into overlapping ~1000-character passages.
-5. Embeds the chunks with a sentence-transformer model and indexes them in a
-   FAISS vector store.
-6. Retrieves the top-K chunks for a question and scores retrieval quality
+1. Extracts text lines with font metadata from every page (PyMuPDF,
+   layout-aware `"dict"` extraction).
+2. Detects numbered H1/H2/H3 headings from their formatting (bold/italic)
+   and numbering pattern, then slices the line stream between headings into
+   paragraph-level elements carrying page/section/subsection metadata.
+3. Parses the reference list into individually addressable, numbered
+   entries (available for citation lookups).
+4. Cleans each element's text — de-hyphenates words broken across line
+   breaks, strips the repeated journal header/footer, DOI, and journal URL
+   boilerplate.
+5. Groups elements by `(section, subsection)` and chunks each group with a
+   token-based length function (`tiktoken`), recovering each chunk's page
+   number(s) via a character-offset → page map. Low-signal chunks (too
+   short, or no meaningful alphabetic content) are filtered out.
+6. Embeds the chunks and indexes them in a FAISS vector store — via a local
+   sentence-transformer model by default, or OpenRouter's embeddings API if
+   configured (see **Embedding backend** below).
+7. Retrieves the top-K chunks for a question and scores retrieval quality
    with a small Precision@K keyword benchmark.
-7. Generates a grounded answer from the retrieved chunks — via the OpenAI API
+8. Generates a grounded answer from the retrieved chunks — via the OpenAI API
    if a key is configured, or via a template-based extractive fallback
    otherwise, so the notebook runs end-to-end without any secret.
 
@@ -57,10 +65,11 @@ machine-specific paths.
   `langchain-text-splitters`, `langchain-community`, `langchain-huggingface`)
   — document/chunking abstractions and vector store integration
 - [sentence-transformers](https://www.sbert.net/) (`all-MiniLM-L6-v2`) — chunk
-  embeddings
+  embeddings (default backend)
+- [tiktoken](https://github.com/openai/tiktoken) — token-based chunk sizing
 - [FAISS](https://faiss.ai/) (`faiss-cpu`) — similarity search index
 - [OpenAI API](https://platform.openai.com/) (optional) — grounded answer
-  generation
+  generation, and (optional, via OpenRouter) an alternate embeddings backend
 
 ## Project Structure
 
@@ -113,8 +122,25 @@ pip install -r requirements.txt
    export OPENAI_API_KEY="sk-..."
    ```
 
-   No key is required to run the notebook; without one, Section 8 falls back
+   No key is required to run the notebook; without one, Section 9 falls back
    to a template-based answer built directly from the retrieved chunks.
+
+### Embedding backend
+
+By default, chunks are embedded locally with `sentence-transformers`
+(`all-MiniLM-L6-v2`) — no API key needed. To use OpenRouter's embeddings API
+instead:
+
+```bash
+export EMBEDDING_BACKEND=openrouter
+export OPENROUTER_API_KEY="sk-or-..."   # your own key — never commit this
+```
+
+The key is only ever read from the environment; it is never hardcoded or
+committed anywhere in this repository. Switching backends changes the vector
+dimensionality, so delete `data/processed/faiss_index/` (or pass
+`force_rebuild=True` to `get_retriever()`) before rebuilding the index after
+a backend change.
 
 ### Web interface (Gradio)
 
@@ -142,11 +168,14 @@ demo.launch(share=True)  # edit the last line of src/app.py
 
 ## Results
 
-- The article parses cleanly into its 7 sections with no leftover PDF
+- The article parses cleanly into its top-level sections and numbered
+  subsections (detected from PDF font metadata) with no leftover PDF
   artifacts (hyphenation, running headers, page numbers).
-- Chunking (chunk size 1000, overlap 150) produces 70 chunks with **zero**
-  leftover `"N of 22"` page-number artifacts (verified with a regression
-  assertion in the notebook).
+- Chunking (token-based, ~350 tokens with 60-token overlap, grouped per
+  subsection) produces chunks with **zero** leftover `"N of 22"`
+  page-number artifacts (verified with a regression assertion in the
+  notebook); the exact chunk count depends on the live tokenizer/model run,
+  so it is not hard-coded here.
 - A 3-question Precision@K retrieval benchmark is included as a smoke test;
   the exact score is printed when the notebook is run and depends on the
   embedding model's live output, so it is not hard-coded here.
