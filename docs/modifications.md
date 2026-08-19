@@ -238,14 +238,14 @@ on a machine with normal internet access to confirm.
 - Switching `EMBEDDING_BACKEND` changes the vector dimensionality; the
   cached FAISS index at `data/processed/faiss_index/` must be rebuilt (it is
   git-ignored, so this is just a local cache concern, not a repo issue).
-- Resolved: the root-level `pipeline.py` and `app.py` duplicates flagged in
-  a previous pass have been removed (see "7d" below). `src/` is now the
-  single source of truth.
+- Root-level `pipeline.py`/`app.py` duplicates: see "7d" below — an earlier
+  pass in this doc claimed they'd been removed, but the merge in "9" found
+  they were still present in both branches; they are now actually deleted.
 
 ## 7d. Follow-up: removed redundant root-level duplicates
 
 `pipeline.py` and `app.py` at the repository root were traced and confirmed
-unused before removal:
+unused:
 
 - Neither file is imported by anything else in the repo (`src/app.py`
   inserts `src/` at the front of `sys.path` and imports `pipeline` from
@@ -253,14 +253,100 @@ unused before removal:
 - Neither is referenced by the README's project structure, installation, or
   usage instructions (`python src/app.py`, notebook imports from
   `src/pipeline.py`).
-- `pipeline.py` was a byte-for-byte pre-integration snapshot of
-  `src/pipeline.py` (missing all of section 7c's changes above); `app.py`
-  differed from `src/app.py` only in `demo.launch(share=True)` vs.
-  `demo.launch()`.
-- No `.git` history was present in the delivered archive to check for other
-  references; a repo-wide grep for `pipeline.py`, `app.py`, and
-  `import pipeline` found no other call sites.
+- `pipeline.py` was a stale pre-integration snapshot of `src/pipeline.py`
+  (missing section 7c's and section 9's changes); `app.py` differed from
+  `src/app.py` only in `demo.launch(share=True)` vs. `demo.launch()`.
+- A repo-wide grep for `pipeline.py`, `app.py`, and `import pipeline` found
+  no other call sites.
 
-Given they were provably dead, unreferenced code, they were deleted rather
-than kept as a diverging, unmaintained second copy of the pipeline. `src/`
-is the project's one implementation going forward.
+They were provably dead, unreferenced code, so they are deleted as part of
+this merge (see "9" below) rather than kept as a diverging, unmaintained
+second copy of the pipeline. `src/` is the project's one implementation
+going forward.
+
+## 9. v2: Layout-Aware Parsing + Reference Resolution (merge of the `S1` branch)
+
+Two parallel follow-ups were developed independently on separate branches
+and needed reconciling in this PR:
+
+- **`main` (7c above)**: layout-aware, font-metadata-based heading detection;
+  token-based (`tiktoken`), subsection-grouped chunking with an accurate
+  character-offset → page map; boilerplate/DOI/URL cleanup; an optional
+  OpenRouter embeddings backend. It did **not** wire the already-existing
+  `parse_references()` utility into chunking or answer generation.
+- **`S1`**: an independently-developed v2 that also added layout-aware
+  parsing, plus a citation-resolution feature the `main` line was missing —
+  each chunk tracks the reference numbers (`cited_refs`) it cites, and
+  `generate_answer()` resolves them back to full citation text via a
+  cached `data/processed/references.json`. Its chunker was
+  sentence-based/character-capped rather than token-based, and it did not
+  have the boilerplate cleanup or OpenRouter backend.
+
+Note that `src/app.py`'s Gradio-facing code (`references = load_references()`,
+`generate_answer(question, retriever, references=references)`, and the
+sources panel's `cited_refs` display) was **already relying on the
+citation-resolution feature** — it just hadn't been re-added to `src/pipeline.py`
+after `main` diverged, which would have been a hard runtime error
+(`NameError: load_references`) had it been merged as-is by favoring `main`
+outright.
+
+**Resolution**: `src/pipeline.py` keeps `main`'s more capable parsing/
+chunking/embedding pipeline, with `S1`'s citation-resolution feature added
+back on top:
+
+- `extract_citation_numbers()` (from `S1`) is applied to each token-based
+  chunk's text in `chunk_elements()`, populating a `cited_refs` field per
+  chunk; `build_documents()` copies it into each `Document`'s metadata.
+- `_save_references()` / `load_references()` (from `S1`) cache the parsed
+  reference list to `data/processed/references.json`; `get_retriever()`
+  now parses and caches references whenever it (re)builds the FAISS index.
+- `generate_answer()` gained back the optional `references` parameter and
+  appends resolved citation text to the answer, in both the OpenAI and
+  extractive-fallback paths.
+- `src/app.py`'s import line now pulls in both `EMBEDDING_BACKEND` (`main`)
+  and `load_references` (`S1`); the rest of the file was already written
+  against this combined API and needed no changes.
+- `notebooks/fibromyalgia_rag_pipeline.ipynb` (which already just calls into
+  `src/pipeline.py`'s functions rather than duplicating logic) needed only
+  small additions: caching the reference list after building the index, and
+  passing `references=references` into the Section 9 `generate_answer()`
+  call, plus an updated Results section.
+- `README.md` — Overview and Results merged to describe the combined
+  pipeline; a Limitations bullet was added noting that, unlike `S1`'s
+  sentence-based chunker, `main`'s token-based chunker does not guarantee a
+  `[N,M]` citation marker can never fall on a chunk boundary, so citation
+  resolution is best-effort.
+- Root-level `pipeline.py`/`app.py` — actually deleted this time (see "7d").
+
+### Not carried over from `S1`
+- The sentence-based/character-capped chunker (`split_sentences_keep_citations`,
+  `chunk_section`) was not kept — `main`'s token-based, subsection-grouped
+  chunker with page-number recovery and boilerplate cleanup is the more
+  complete implementation, and citation tracking was ported onto it instead
+  of the other way around.
+
+### Testing
+- `src/pipeline.py` and `src/app.py` were syntax-checked (`py_compile`).
+- The merge was reproduced and resolved from the actual `main`/`S1` branch
+  tips (not just the PR's diff view) to confirm the true content of each
+  side before deciding how to combine them.
+- **Not tested in this environment**: the real PDF extraction, embedding,
+  FAISS, and OpenAI/OpenRouter API calls (no network egress to PyPI/model
+  hosts in this sandbox for those packages). Run
+  `jupyter notebook notebooks/fibromyalgia_rag_pipeline.ipynb` or
+  `python src/app.py` on a machine with normal internet access to confirm
+  end-to-end, including that a fresh index build produces a
+  `data/processed/references.json` and that citation resolution shows up in
+  answers.
+
+### Remaining limitations
+- Citation resolution is best-effort: `main`'s token-based chunker can in
+  principle split a `[N,M]` marker across a chunk boundary, unlike `S1`'s
+  sentence-based chunker (see "Not carried over from `S1`" above).
+- Heading detection still assumes the specific bold/italic typographic
+  convention observed in this article.
+- `generate_answer()`'s citation resolution only surfaces references cited
+  by the *retrieved* chunks — it does not verify that the LLM's generated
+  answer actually discusses those citations correctly; this is the same
+  "no faithfulness metric" limitation noted in Section 8 above, now
+  extended to citations.

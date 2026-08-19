@@ -14,16 +14,20 @@ Given the source PDF, the pipeline:
    layout-aware `"dict"` extraction).
 2. Detects numbered H1/H2/H3 headings from their formatting (bold/italic)
    and numbering pattern, then slices the line stream between headings into
-   paragraph-level elements carrying page/section/subsection metadata.
+   paragraph-level elements carrying page/section/subsection metadata,
+   rejoining words hyphenated across a line break at the point where the
+   hyphen is still visible.
 3. Parses the reference list into individually addressable, numbered
-   entries (available for citation lookups).
+   entries, keyed by citation number, so an in-text `[N]`/`[N,M]` marker can
+   be resolved back to its source.
 4. Cleans each element's text — de-hyphenates words broken across line
    breaks, strips the repeated journal header/footer, DOI, and journal URL
    boilerplate.
 5. Groups elements by `(section, subsection)` and chunks each group with a
    token-based length function (`tiktoken`), recovering each chunk's page
    number(s) via a character-offset → page map. Low-signal chunks (too
-   short, or no meaningful alphabetic content) are filtered out.
+   short, or no meaningful alphabetic content) are filtered out. Each chunk
+   also records the reference numbers (`cited_refs`) it contains.
 6. Embeds the chunks and indexes them in a FAISS vector store — via a local
    sentence-transformer model by default, or OpenRouter's embeddings API if
    configured (see **Embedding backend** below).
@@ -31,7 +35,8 @@ Given the source PDF, the pipeline:
    with a small Precision@K keyword benchmark.
 8. Generates a grounded answer from the retrieved chunks — via the OpenAI API
    if a key is configured, or via a template-based extractive fallback
-   otherwise, so the notebook runs end-to-end without any secret.
+   otherwise — and resolves any cited reference numbers back to their full
+   citation text, so the notebook/app run end-to-end without any secret.
 
 ## Objectives
 
@@ -89,7 +94,8 @@ project/
 ├── data/
 │   ├── raw/
 │   │   └── biomedicines-12-01543.pdf
-│   └── processed/          # generated at runtime (FAISS index); git-ignored
+│   └── processed/          # generated at runtime (FAISS index +
+│                           # parsed reference list); git-ignored
 │
 ├── outputs/                # reserved for exported answers/reports, if any
 │
@@ -156,9 +162,10 @@ python src/app.py
   cached index and start instantly.
 - Open the local URL Gradio prints (typically `http://127.0.0.1:7860`).
 - Type a question, hit **Ask**, and you'll get the generated answer plus the
-  retrieved source passages underneath, labeled by article section.
+  retrieved source passages underneath, labeled by article section and, when
+  applicable, the reference numbers each passage cites.
 - Works with or without `OPENAI_API_KEY` set, exactly like the notebook's
-  generation step (Section 8) — the app header shows which mode is active.
+  generation step (Section 10) — the app header shows which mode is active.
 
 To share the interface temporarily (e.g. for a demo), pass `share=True`:
 
@@ -170,18 +177,20 @@ demo.launch(share=True)  # edit the last line of src/app.py
 
 - The article parses cleanly into its top-level sections and numbered
   subsections (detected from PDF font metadata) with no leftover PDF
-  artifacts (hyphenation, running headers, page numbers).
+  artifacts (hyphenation, running headers, page numbers), and the reference
+  list is parsed into individually addressable entries.
 - Chunking (token-based, ~350 tokens with 60-token overlap, grouped per
   subsection) produces chunks with **zero** leftover `"N of 22"`
   page-number artifacts (verified with a regression assertion in the
   notebook); the exact chunk count depends on the live tokenizer/model run,
-  so it is not hard-coded here.
+  so it is not hard-coded here. Each chunk records the reference numbers it
+  cites, and `generate_answer()` resolves those back to full citation text.
 - A 3-question Precision@K retrieval benchmark is included as a smoke test;
   the exact score is printed when the notebook is run and depends on the
   embedding model's live output, so it is not hard-coded here.
 - The RAG loop is complete end-to-end: retrieval feeds into an answer
-  generation step, which was missing in the original notebook (see
-  [`docs/modifications.md`](docs/modifications.md)).
+  generation step that also resolves any cited reference numbers back to
+  their full citation text (see [`docs/modifications.md`](docs/modifications.md)).
 
 ## Conclusion
 
@@ -195,11 +204,16 @@ benchmark.
 
 - The corpus is a single article; the retrieval evaluation is a 3-question
   smoke test, not a statistically powered benchmark.
-- Section parsing matches the exact numbered heading text used in this
-  article and would need adapting for articles with a different heading
-  scheme.
+- Heading detection assumes the `N.` (bold) / `N.N.` (italic) / `N.N.N.`
+  numbering-and-typography convention used by this article; a differently
+  typeset article would need its own font/style rules.
 - Full LLM-based generation requires an OpenAI API key (not included, and
   never committed to this repository). Without one, generation degrades to
   an extractive summary of the retrieved context.
 - No automated evaluation (e.g. faithfulness or answer-relevance scoring) is
   performed on the generation step itself — only on retrieval.
+- Chunking is token-count-based (`RecursiveCharacterTextSplitter`), not
+  sentence-based, so a `[N,M]`-style citation marker could in principle fall
+  right at a chunk boundary and be split across two chunks; citation
+  resolution (`cited_refs`) is best-effort, not guaranteed complete for
+  every marker.

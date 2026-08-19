@@ -14,16 +14,23 @@ keeps working if a heading's wording changes slightly. Chunking is
 token-based (tiktoken) and grouped per subsection, which keeps each chunk's
 page number(s) accurate via a character-offset -> page map instead of a
 string search.
+
+Each chunk also carries the in-text citation numbers (`[12,45]`-style
+markers) it contains (`cited_refs`), which `generate_answer()` can resolve
+back to their full reference text via the parsed, cached reference list
+(`parse_references()` / `load_references()`).
 """
 
 from __future__ import annotations
 
 import bisect
 import hashlib
+import json
 import os
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 from langchain_core.documents import Document
 
@@ -31,6 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_RAW_DIR = PROJECT_ROOT / "data" / "raw"
 DATA_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 INDEX_DIR = DATA_PROCESSED_DIR / "faiss_index"
+REFERENCES_PATH = DATA_PROCESSED_DIR / "references.json"
 PDF_PATH = DATA_RAW_DIR / "biomedicines-12-01543.pdf"
 
 METADATA = {
@@ -237,6 +245,43 @@ def parse_references(pdf_path: Path = PDF_PATH) -> dict[int, str]:
     return entries
 
 
+def _save_references(references: dict[int, str]) -> None:
+    """Cache the parsed reference list to disk alongside the FAISS index so
+    it can be reloaded (via `load_references()`) without re-parsing the PDF."""
+    DATA_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    REFERENCES_PATH.write_text(
+        json.dumps({str(k): v for k, v in references.items()}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_references() -> dict[int, str]:
+    """Load the cached, parsed reference list (empty dict if not built yet)."""
+    if not REFERENCES_PATH.exists():
+        return {}
+    raw = json.loads(REFERENCES_PATH.read_text(encoding="utf-8"))
+    return {int(k): v for k, v in raw.items()}
+
+
+# ---------------------------------------------------------------------------
+# Citation markers
+# ---------------------------------------------------------------------------
+
+CITATION_MARKER = re.compile(r"\[([\d,\s]+)\]")
+
+
+def extract_citation_numbers(text: str) -> list[int]:
+    """Return the sorted, de-duplicated reference numbers cited in `text`
+    via `[N]` / `[N,M]`-style markers."""
+    nums = set()
+    for m in CITATION_MARKER.finditer(text):
+        for n in m.group(1).split(","):
+            n = n.strip()
+            if n.isdigit():
+                nums.add(int(n))
+    return sorted(nums)
+
+
 # ---------------------------------------------------------------------------
 # Cleaning
 # ---------------------------------------------------------------------------
@@ -353,6 +398,7 @@ def chunk_elements(elements: list[dict], chunk_size: int = 350, chunk_overlap: i
                     "n_tokens": token_len(chunk_text),
                     "n_chars": len(chunk_text),
                     "text": chunk_text,
+                    "cited_refs": extract_citation_numbers(chunk_text),
                 }
             )
 
@@ -385,6 +431,7 @@ def build_documents(chunks: list[dict]) -> list[Document]:
                 "chunk_index": chunk["chunk_index"],
                 "n_tokens": chunk["n_tokens"],
                 "n_chars": chunk["n_chars"],
+                "cited_refs": chunk["cited_refs"],
             },
         )
         for chunk in chunks
@@ -480,6 +527,7 @@ def get_retriever(k: int = 3, force_rebuild: bool = False):
         vectorstore, embeddings = build_vectorstore(documents)
         DATA_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
         vectorstore.save_local(str(INDEX_DIR))
+        _save_references(parse_references())
 
     return vectorstore.as_retriever(search_kwargs={"k": k})
 
@@ -504,11 +552,19 @@ def evaluate_retrieval(eval_dataset: list[dict], retriever) -> float:
 # ---------------------------------------------------------------------------
 
 
-def generate_answer(question: str, retriever, model: str = "gpt-4o-mini") -> tuple[str, list[Document]]:
+def generate_answer(
+    question: str,
+    retriever,
+    model: str = "gpt-4o-mini",
+    references: Optional[dict[int, str]] = None,
+) -> tuple[str, list[Document]]:
     """Answer `question` using retrieved context (RAG).
 
     Returns (answer_text, retrieved_docs) so callers (e.g. the Gradio app)
-    can display both the answer and its supporting context.
+    can display both the answer and its supporting context. If `references`
+    (the parsed reference list, see `load_references()`) is provided, any
+    citation numbers carried by the retrieved chunks (`cited_refs`) are
+    resolved back to their full reference text and appended to the answer.
     """
     docs = retriever.invoke(question)
     context = "\n\n".join(f"[Section: {d.metadata['section']}]\n{d.page_content}" for d in docs)
@@ -532,13 +588,20 @@ def generate_answer(question: str, retriever, model: str = "gpt-4o-mini") -> tup
             ],
             temperature=0,
         )
-        return response.choices[0].message.content, docs
+        answer = response.choices[0].message.content
+    else:
+        sections_used = ", ".join(sorted({d.metadata["section"] for d in docs}))
+        preview = "\n\n".join(d.page_content.strip() for d in docs)
+        answer = (
+            f"[Extractive fallback - no OPENAI_API_KEY set]\n"
+            f"Most relevant sections: {sections_used}\n\n"
+            f"Retrieved context:\n{preview}"
+        )
 
-    sections_used = ", ".join(sorted({d.metadata["section"] for d in docs}))
-    preview = "\n\n".join(d.page_content.strip() for d in docs)
-    answer = (
-        f"[Extractive fallback - no OPENAI_API_KEY set]\n"
-        f"Most relevant sections: {sections_used}\n\n"
-        f"Retrieved context:\n{preview}"
-    )
+    if references:
+        cited_nums = sorted({n for d in docs for n in d.metadata.get("cited_refs", [])})
+        citation_lines = [f"[{n}] {references[n]}" for n in cited_nums if n in references]
+        if citation_lines:
+            answer = f"{answer}\n\nReferences cited in the retrieved passages:\n" + "\n".join(citation_lines)
+
     return answer, docs
