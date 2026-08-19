@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gradio as gr
-from pipeline import generate_answer, get_retriever, load_references
+from pipeline import EMBEDDING_BACKEND, generate_answer, get_retriever, load_references
 
 print("Loading / building the retrieval index (first run may take a minute)...")
 retriever = get_retriever(k=3)
@@ -62,7 +62,8 @@ with gr.Blocks(title="Fibromyalgia RAG") as demo:
         "# 🩺 Fibromyalgia Article Q&A (RAG)\n"
         "Ask a question about the fibromyalgia review article and get a "
         "grounded answer with the retrieved source passages.\n\n"
-        f"**Generation mode:** {generation_mode}"
+        f"**Generation mode:** {generation_mode}  \n"
+        f"**Embedding backend:** {EMBEDDING_BACKEND}"
     )
 
     with gr.Row():

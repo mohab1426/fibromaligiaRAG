@@ -150,6 +150,77 @@ Gradio server were not run end-to-end here due to the same
 `huggingface.co` network restriction noted in Section 7 — run
 `python src/app.py` yourself once to confirm on your machine.
 
+## 7c. Follow-up: Layout-aware parsing, subsection chunking, optional OpenRouter embeddings
+
+A second team notebook (`fibromyalgia_.ipynb`, 33 cells) prototyped a more
+detailed parsing/chunking approach and an alternate embeddings backend. It
+was **not** added to the repository — its logic was integrated into
+`src/pipeline.py` and the notebook was regenerated to match. Changes:
+
+- **Parsing replaced with layout-aware heading detection.** `extract_lines()`
+  now reads PyMuPDF's `"dict"` output (text + font metadata) instead of
+  plain text. `detect_headings()` identifies H1/H2/H3 headings from a
+  numbering-pattern regex combined with bold/italic formatting, and
+  `build_sections()` slices the line stream between headings into
+  paragraph-level elements carrying page/section/**subsection** metadata.
+  This replaces the previous `parse_sections()`, which matched a fixed list
+  of 7 section-title strings and had no subsection granularity.
+- **Reference-list parsing added.** `parse_references()` parses the
+  bibliography into individually addressable, numbered entries. It's a
+  standalone utility (not wired into chunking/retrieval), preserved because
+  it was part of the notebook's already-working parsing logic.
+- **Chunking replaced with token-based, subsection-grouped chunking.**
+  `chunk_elements()` groups cleaned elements by `(section, subsection)`,
+  splits each group with `RecursiveCharacterTextSplitter` using a
+  `tiktoken`-based token-length function (previously character-based), and
+  recovers each chunk's page number(s) via a character-offset → page map
+  instead of a text search. `filter_meaningful_chunks()` drops low-signal
+  chunks (fewer than 5 tokens, or no meaningful alphabetic content).
+- **OpenRouter embeddings added as an optional backend.** `_build_embeddings()`
+  dispatches on the `EMBEDDING_BACKEND` environment variable: `huggingface`
+  (default, unchanged, no key required) or `openrouter`, which requires
+  `OPENROUTER_API_KEY` to be set. `src/app.py` now shows the active backend
+  alongside the existing generation-mode indicator.
+- **Retrieval evaluation unchanged.** The notebook's `evaluate_retrieval()`
+  logic and 3-question eval set were already identical to the existing
+  implementation; nothing to integrate there.
+- **Answer generation unchanged.** The team notebook had no generation step
+  (it stopped after retrieval, the same gap noted in Problem 2 above); the
+  existing `generate_answer()` was kept as-is.
+
+**Security note:** the uploaded notebook contained a live, hardcoded
+OpenRouter API key in its embeddings cell. It was **not** carried into the
+repository in any form — `OPENROUTER_API_KEY` is read from the environment
+only. The exposed key should be revoked/rotated at
+https://openrouter.ai/keys.
+
+Files touched: `src/pipeline.py` (rewritten), `src/app.py` (one line added
+to display the active embedding backend), `notebooks/fibromyalgia_rag_pipeline.ipynb`
+(regenerated to mirror the new pipeline steps), `requirements.txt` (added
+`tiktoken`), `README.md` (pipeline description, embedding-backend docs,
+Results section updated to not hard-code a chunk count that changed).
+
+Testing: this sandbox has no network access at all (not even PyPI), so none
+of the third-party libraries (`fitz`, `langchain_*`, `tiktoken`, `openai`,
+`faiss`) could be installed or exercised directly. The new parsing/chunking
+logic (`detect_headings`, `build_sections`, `clean_elements`,
+`chunk_elements`, `filter_meaningful_chunks`, `parse_references`'s regex
+core, `is_meaningful_chunk`) was instead verified against synthetic
+line/text fixtures using lightweight stand-ins for `tiktoken` and
+`RecursiveCharacterTextSplitter`, and the `_build_embeddings()` backend
+dispatch was verified against a stubbed `openai` client — confirming
+correct heading levels, section/subsection propagation, page-number
+recovery, chunk_id generation, the meaningful-chunk filter, and that the
+`OPENROUTER_API_KEY` is read only from the environment (a source-level
+check also confirmed no literal key string is present in `pipeline.py`).
+All edited/created files were syntax-checked (`py_compile` for `.py`
+files; the notebook's JSON structure and each code cell's `ast.parse`
+were checked — the `%pip install` magic cell is expected to fail plain
+Python parsing, same as the pre-existing notebook). The real PDF parsing,
+embedding, indexing, and OpenAI/OpenRouter API calls were **not** run
+end-to-end in this sandbox; run the notebook or `src/app.py` yourself once
+on a machine with normal internet access to confirm.
+
 ## 8. Remaining Limitations
 
 - The real embedding + OpenAI generation paths could not be executed in this
@@ -160,117 +231,120 @@ Gradio server were not run end-to-end here due to the same
   generation step — only retrieval quality is scored.
 - The retrieval benchmark is intentionally small (3 questions) and should be
   treated as a smoke test, not a statistically meaningful evaluation.
+- The heading-detection regexes assume the numbering/formatting conventions
+  of this specific article (bold `N.` for H1, italic `N.N.` for H2, plain
+  `N.N.N.` on its own line for H3) and would need adapting for articles with
+  a different heading scheme.
+- Switching `EMBEDDING_BACKEND` changes the vector dimensionality; the
+  cached FAISS index at `data/processed/faiss_index/` must be rebuilt (it is
+  git-ignored, so this is just a local cache concern, not a repo issue).
+- Root-level `pipeline.py`/`app.py` duplicates: see "7d" below — an earlier
+  pass in this doc claimed they'd been removed, but the merge in "9" found
+  they were still present in both branches; they are now actually deleted.
 
-## 9. v2: Layout-Aware Parsing, Reference Resolution, Citation-Aware Chunking
+## 7d. Follow-up: removed redundant root-level duplicates
 
-A teammate prototyped a v2 parsing approach in a notebook
-(`fibromyalgia_rag.ipynb`, 14 cells) that replaces the v1 extraction/
-cleaning/section-splitting/chunking steps described above. It was
-integrated into `src/pipeline.py` (and mirrored in
-`notebooks/fibromyalgia_rag_pipeline.ipynb`) as follows:
+`pipeline.py` and `app.py` at the repository root were traced and confirmed
+unused:
 
-- **Layout-aware extraction** (`extract_lines`) replaces flat-text
-  extraction with PyMuPDF's `"dict"` output, keeping each line's font
-  family/style. Running headers/footers and `"N of 22"` page markers are
-  filtered out at the line level (`JUNK_LINE_PATTERNS`) instead of by a
-  post-hoc regex on collapsed text.
-- **Typography-based heading detection** (`detect_headings`) replaces the
-  v1 hardcoded `SECTIONS` list (`text.find("2. Epidemiology")`, etc.) with
-  regex + font-weight/style rules (`N.` bold, `N.N.` italic, `N.N.N.` own
-  line). This generalizes to other MDPI-style review articles instead of
-  being hardcoded to this one PDF's exact heading text.
-- **Reference-list parsing** (`parse_references`) is new: the v1 pipeline
-  discarded everything after "References". Reference entries are now parsed
-  individually and keyed by citation number, cached to
-  `data/processed/references.json` alongside the FAISS index
-  (`load_references()` reloads them without rebuilding the index).
-- **Citation-aware, sentence-based chunking** (`split_sentences_keep_citations`,
-  `chunk_section`) replaces `RecursiveCharacterTextSplitter`-based
-  character chunking. Chunks are built sentence-by-sentence up to a soft
-  character cap, and `[12,45]`-style citation markers are protected during
-  sentence splitting so a marker is never divided across two chunks. Each
-  chunk records which reference numbers it cites (`cited_refs` metadata).
-- **Hyphenation rejoining moved earlier** (`join_lines_dehyphenated`): done
-  at line-join time, when the original `-` + line-break pattern is still
-  visible, rather than as a regex pass over already-collapsed text (where
-  it could never match).
-- **`generate_answer()` extended** to resolve any `cited_refs` on the
-  retrieved chunks back to their full reference text (via the optional
-  `references` argument) and append them to the answer, in both the OpenAI
-  and extractive-fallback paths.
-- **`src/app.py` extended** to load the cached reference list at startup and
-  pass it to `generate_answer()`; the sources panel now also shows which
-  reference numbers each retrieved passage cites.
+- Neither file is imported by anything else in the repo (`src/app.py`
+  inserts `src/` at the front of `sys.path` and imports `pipeline` from
+  there, i.e. `src/pipeline.py` — never the root copy).
+- Neither is referenced by the README's project structure, installation, or
+  usage instructions (`python src/app.py`, notebook imports from
+  `src/pipeline.py`).
+- `pipeline.py` was a stale pre-integration snapshot of `src/pipeline.py`
+  (missing section 7c's and section 9's changes); `app.py` differed from
+  `src/app.py` only in `demo.launch(share=True)` vs. `demo.launch()`.
+- A repo-wide grep for `pipeline.py`, `app.py`, and `import pipeline` found
+  no other call sites.
 
-### Files modified
-- `src/pipeline.py` — extraction, heading detection, section building,
-  reference parsing, and chunking rewritten per above;
-  `build_documents()`/`get_retriever()` updated to the new pipeline;
-  `generate_answer()` extended with reference resolution. `evaluate_retrieval()`
-  is unchanged.
-- `src/app.py` — loads and passes the parsed reference list; sources panel
-  shows cited reference numbers per passage.
-- `notebooks/fibromyalgia_rag_pipeline.ipynb` — regenerated to document the
-  v2 pipeline end-to-end (layout-aware extraction through citation-resolved
-  generation), replacing the v1 walkthrough. No functionality was dropped;
-  retrieval evaluation and answer generation (with the new citation
-  resolution) are both preserved.
-- `README.md` — Overview, Results, Limitations, and the Gradio usage section
-  updated to describe the v2 pipeline instead of the fixed-heading,
-  character-based v1 approach.
-- `.gitignore` — broadened `data/processed/faiss_index/` to `data/processed/`
-  so the new cached `references.json` is also git-ignored, matching the
-  README's stated intent that the whole `data/processed/` folder is a
-  runtime-generated cache.
+They were provably dead, unreferenced code, so they are deleted as part of
+this merge (see "9" below) rather than kept as a diverging, unmaintained
+second copy of the pipeline. `src/` is the project's one implementation
+going forward.
 
-### Files removed
-- Root-level `app.py` and `pipeline.py` — these were stale, undocumented
-  duplicates of `src/app.py`/`src/pipeline.py` (identical apart from one
-  `demo.launch()` argument), not referenced anywhere in the README's
-  documented project structure. Left in place, they would have silently
-  diverged from the v2 pipeline logic in `src/`, so they were removed as
-  part of resolving this duplication rather than updated in parallel. This
-  predates the v2 integration; it is called out here because leaving a
-  stale, un-synced duplicate would have been actively misleading.
+## 9. v2: Layout-Aware Parsing + Reference Resolution (merge of the `S1` branch)
 
-### Dependencies
-- No new dependencies were required. `pymupdf` (imported as `fitz`) was
-  already a project dependency and is the only library the v2 parsing logic
-  needs beyond the Python standard library (`json` was already in the
-  standard library and needed no new entry in `requirements.txt`).
+Two parallel follow-ups were developed independently on separate branches
+and needed reconciling in this PR:
+
+- **`main` (7c above)**: layout-aware, font-metadata-based heading detection;
+  token-based (`tiktoken`), subsection-grouped chunking with an accurate
+  character-offset → page map; boilerplate/DOI/URL cleanup; an optional
+  OpenRouter embeddings backend. It did **not** wire the already-existing
+  `parse_references()` utility into chunking or answer generation.
+- **`S1`**: an independently-developed v2 that also added layout-aware
+  parsing, plus a citation-resolution feature the `main` line was missing —
+  each chunk tracks the reference numbers (`cited_refs`) it cites, and
+  `generate_answer()` resolves them back to full citation text via a
+  cached `data/processed/references.json`. Its chunker was
+  sentence-based/character-capped rather than token-based, and it did not
+  have the boilerplate cleanup or OpenRouter backend.
+
+Note that `src/app.py`'s Gradio-facing code (`references = load_references()`,
+`generate_answer(question, retriever, references=references)`, and the
+sources panel's `cited_refs` display) was **already relying on the
+citation-resolution feature** — it just hadn't been re-added to `src/pipeline.py`
+after `main` diverged, which would have been a hard runtime error
+(`NameError: load_references`) had it been merged as-is by favoring `main`
+outright.
+
+**Resolution**: `src/pipeline.py` keeps `main`'s more capable parsing/
+chunking/embedding pipeline, with `S1`'s citation-resolution feature added
+back on top:
+
+- `extract_citation_numbers()` (from `S1`) is applied to each token-based
+  chunk's text in `chunk_elements()`, populating a `cited_refs` field per
+  chunk; `build_documents()` copies it into each `Document`'s metadata.
+- `_save_references()` / `load_references()` (from `S1`) cache the parsed
+  reference list to `data/processed/references.json`; `get_retriever()`
+  now parses and caches references whenever it (re)builds the FAISS index.
+- `generate_answer()` gained back the optional `references` parameter and
+  appends resolved citation text to the answer, in both the OpenAI and
+  extractive-fallback paths.
+- `src/app.py`'s import line now pulls in both `EMBEDDING_BACKEND` (`main`)
+  and `load_references` (`S1`); the rest of the file was already written
+  against this combined API and needed no changes.
+- `notebooks/fibromyalgia_rag_pipeline.ipynb` (which already just calls into
+  `src/pipeline.py`'s functions rather than duplicating logic) needed only
+  small additions: caching the reference list after building the index, and
+  passing `references=references` into the Section 9 `generate_answer()`
+  call, plus an updated Results section.
+- `README.md` — Overview and Results merged to describe the combined
+  pipeline; a Limitations bullet was added noting that, unlike `S1`'s
+  sentence-based chunker, `main`'s token-based chunker does not guarantee a
+  `[N,M]` citation marker can never fall on a chunk boundary, so citation
+  resolution is best-effort.
+- Root-level `pipeline.py`/`app.py` — actually deleted this time (see "7d").
+
+### Not carried over from `S1`
+- The sentence-based/character-capped chunker (`split_sentences_keep_citations`,
+  `chunk_section`) was not kept — `main`'s token-based, subsection-grouped
+  chunker with page-number recovery and boilerplate cleanup is the more
+  complete implementation, and citation tracking was ported onto it instead
+  of the other way around.
 
 ### Testing
-- The notebook (`fibromyalgia_rag.ipynb`) was analyzed only as a reference
-  and was **not** added to the project; its logic was reimplemented in
-  `src/pipeline.py`.
-- All pure-Python logic that doesn't require PyMuPDF or a live embedding
-  model — `join_lines_dehyphenated`, `detect_headings`, `build_sections`,
-  `split_sentences_keep_citations`, `extract_citation_numbers`,
-  `chunk_section`, `build_documents` (including its page-number regression
-  assertion), `generate_answer`'s citation-resolution logic (both the
-  OpenAI and extractive-fallback paths), and `evaluate_retrieval` — was
-  exercised end-to-end against synthetic inputs in this sandbox and passed.
-- `src/pipeline.py` and `src/app.py` were syntax-checked (`ast.parse`), as
-  was every code cell of the regenerated notebook.
-- **Not tested in this environment**: `extract_lines`/`parse_references`
-  against the real PDF, and the embedding/FAISS/OpenAI paths, because this
-  sandbox has no network egress and PyMuPDF/langchain/faiss could not be
-  installed (same restriction noted in Section 7/7b above). These code
-  paths are carried over from the notebook largely as-is (the parsing
-  regexes/logic are unchanged from what the notebook author already
-  validated against the real PDF, per that notebook's own printed output
-  — e.g. reference-count and lowercase-surname checks). Please run
-  `python src/app.py` or the notebook once on a machine with normal
-  internet access to confirm end-to-end before relying on it.
+- `src/pipeline.py` and `src/app.py` were syntax-checked (`py_compile`).
+- The merge was reproduced and resolved from the actual `main`/`S1` branch
+  tips (not just the PR's diff view) to confirm the true content of each
+  side before deciding how to combine them.
+- **Not tested in this environment**: the real PDF extraction, embedding,
+  FAISS, and OpenAI/OpenRouter API calls (no network egress to PyPI/model
+  hosts in this sandbox for those packages). Run
+  `jupyter notebook notebooks/fibromyalgia_rag_pipeline.ipynb` or
+  `python src/app.py` on a machine with normal internet access to confirm
+  end-to-end, including that a fresh index build produces a
+  `data/processed/references.json` and that citation resolution shows up in
+  answers.
 
 ### Remaining limitations
-- As above: the real PDF extraction/reference-parsing and the live
-  embedding/OpenAI paths are unverified in this sandbox; verify on a
-  machine with network access.
-- Heading detection assumes the specific bold/italic typographic convention
-  observed in this article; a review article that numbers sections
-  differently (or doesn't bold/italicize headings) would need adapted
-  detection rules.
+- Citation resolution is best-effort: `main`'s token-based chunker can in
+  principle split a `[N,M]` marker across a chunk boundary, unlike `S1`'s
+  sentence-based chunker (see "Not carried over from `S1`" above).
+- Heading detection still assumes the specific bold/italic typographic
+  convention observed in this article.
 - `generate_answer()`'s citation resolution only surfaces references cited
   by the *retrieved* chunks — it does not verify that the LLM's generated
   answer actually discusses those citations correctly; this is the same

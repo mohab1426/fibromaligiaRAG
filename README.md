@@ -10,23 +10,27 @@ Cueto-Ureña, Ramírez-Expósito & Martínez-Martos, 2024, *Biomedicines* 12(7),
 
 Given the source PDF, the pipeline:
 
-1. Extracts PDF lines with layout/font metadata (PyMuPDF), instead of flat
-   text, so headings can be detected by how they're typeset.
-2. Detects numbered section headings (`N.` bold, `N.N.` italic, `N.N.N.` on
-   its own line) from that typography rather than a hardcoded list of
-   heading strings — this generalizes to other MDPI-style review articles
-   using the same numbering convention.
-3. Builds each section's text, rejoining words hyphenated across a line
-   break at the point where the hyphen is still visible.
-4. Parses the article's reference list into individually addressable
-   entries, keyed by citation number, so an in-text `[N]` marker can be
-   resolved back to its source.
-5. Chunks each section sentence-by-sentence up to a soft character cap,
-   protecting `[12,45]`-style citation markers so a chunk never splits a
-   sentence or a citation marker; each chunk records the reference numbers
-   it cites.
-6. Embeds the chunks with a sentence-transformer model and indexes them in a
-   FAISS vector store.
+1. Extracts text lines with font metadata from every page (PyMuPDF,
+   layout-aware `"dict"` extraction).
+2. Detects numbered H1/H2/H3 headings from their formatting (bold/italic)
+   and numbering pattern, then slices the line stream between headings into
+   paragraph-level elements carrying page/section/subsection metadata,
+   rejoining words hyphenated across a line break at the point where the
+   hyphen is still visible.
+3. Parses the reference list into individually addressable, numbered
+   entries, keyed by citation number, so an in-text `[N]`/`[N,M]` marker can
+   be resolved back to its source.
+4. Cleans each element's text — de-hyphenates words broken across line
+   breaks, strips the repeated journal header/footer, DOI, and journal URL
+   boilerplate.
+5. Groups elements by `(section, subsection)` and chunks each group with a
+   token-based length function (`tiktoken`), recovering each chunk's page
+   number(s) via a character-offset → page map. Low-signal chunks (too
+   short, or no meaningful alphabetic content) are filtered out. Each chunk
+   also records the reference numbers (`cited_refs`) it contains.
+6. Embeds the chunks and indexes them in a FAISS vector store — via a local
+   sentence-transformer model by default, or OpenRouter's embeddings API if
+   configured (see **Embedding backend** below).
 7. Retrieves the top-K chunks for a question and scores retrieval quality
    with a small Precision@K keyword benchmark.
 8. Generates a grounded answer from the retrieved chunks — via the OpenAI API
@@ -66,10 +70,11 @@ machine-specific paths.
   `langchain-text-splitters`, `langchain-community`, `langchain-huggingface`)
   — document/chunking abstractions and vector store integration
 - [sentence-transformers](https://www.sbert.net/) (`all-MiniLM-L6-v2`) — chunk
-  embeddings
+  embeddings (default backend)
+- [tiktoken](https://github.com/openai/tiktoken) — token-based chunk sizing
 - [FAISS](https://faiss.ai/) (`faiss-cpu`) — similarity search index
 - [OpenAI API](https://platform.openai.com/) (optional) — grounded answer
-  generation
+  generation, and (optional, via OpenRouter) an alternate embeddings backend
 
 ## Project Structure
 
@@ -123,8 +128,25 @@ pip install -r requirements.txt
    export OPENAI_API_KEY="sk-..."
    ```
 
-   No key is required to run the notebook; without one, Section 8 falls back
+   No key is required to run the notebook; without one, Section 9 falls back
    to a template-based answer built directly from the retrieved chunks.
+
+### Embedding backend
+
+By default, chunks are embedded locally with `sentence-transformers`
+(`all-MiniLM-L6-v2`) — no API key needed. To use OpenRouter's embeddings API
+instead:
+
+```bash
+export EMBEDDING_BACKEND=openrouter
+export OPENROUTER_API_KEY="sk-or-..."   # your own key — never commit this
+```
+
+The key is only ever read from the environment; it is never hardcoded or
+committed anywhere in this repository. Switching backends changes the vector
+dimensionality, so delete `data/processed/faiss_index/` (or pass
+`force_rebuild=True` to `get_retriever()`) before rebuilding the index after
+a backend change.
 
 ### Web interface (Gradio)
 
@@ -153,12 +175,16 @@ demo.launch(share=True)  # edit the last line of src/app.py
 
 ## Results
 
-- The article's numbered section headings are detected from PDF layout/font
-  metadata (not a hardcoded heading list), and the reference list is parsed
-  into individually addressable entries.
-- Chunking is sentence- and citation-aware: chunks never split a sentence or
-  a `[N]`/`[N,M]` citation marker, and a regression assertion guards against
-  leftover `"N of 22"` page-number artifacts surviving into a chunk.
+- The article parses cleanly into its top-level sections and numbered
+  subsections (detected from PDF font metadata) with no leftover PDF
+  artifacts (hyphenation, running headers, page numbers), and the reference
+  list is parsed into individually addressable entries.
+- Chunking (token-based, ~350 tokens with 60-token overlap, grouped per
+  subsection) produces chunks with **zero** leftover `"N of 22"`
+  page-number artifacts (verified with a regression assertion in the
+  notebook); the exact chunk count depends on the live tokenizer/model run,
+  so it is not hard-coded here. Each chunk records the reference numbers it
+  cites, and `generate_answer()` resolves those back to full citation text.
 - A 3-question Precision@K retrieval benchmark is included as a smoke test;
   the exact score is printed when the notebook is run and depends on the
   embedding model's live output, so it is not hard-coded here.
@@ -186,3 +212,8 @@ benchmark.
   an extractive summary of the retrieved context.
 - No automated evaluation (e.g. faithfulness or answer-relevance scoring) is
   performed on the generation step itself — only on retrieval.
+- Chunking is token-count-based (`RecursiveCharacterTextSplitter`), not
+  sentence-based, so a `[N,M]`-style citation marker could in principle fall
+  right at a chunk boundary and be split across two chunks; citation
+  resolution (`cited_refs`) is best-effort, not guaranteed complete for
+  every marker.
