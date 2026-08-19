@@ -160,3 +160,119 @@ Gradio server were not run end-to-end here due to the same
   generation step — only retrieval quality is scored.
 - The retrieval benchmark is intentionally small (3 questions) and should be
   treated as a smoke test, not a statistically meaningful evaluation.
+
+## 9. v2: Layout-Aware Parsing, Reference Resolution, Citation-Aware Chunking
+
+A teammate prototyped a v2 parsing approach in a notebook
+(`fibromyalgia_rag.ipynb`, 14 cells) that replaces the v1 extraction/
+cleaning/section-splitting/chunking steps described above. It was
+integrated into `src/pipeline.py` (and mirrored in
+`notebooks/fibromyalgia_rag_pipeline.ipynb`) as follows:
+
+- **Layout-aware extraction** (`extract_lines`) replaces flat-text
+  extraction with PyMuPDF's `"dict"` output, keeping each line's font
+  family/style. Running headers/footers and `"N of 22"` page markers are
+  filtered out at the line level (`JUNK_LINE_PATTERNS`) instead of by a
+  post-hoc regex on collapsed text.
+- **Typography-based heading detection** (`detect_headings`) replaces the
+  v1 hardcoded `SECTIONS` list (`text.find("2. Epidemiology")`, etc.) with
+  regex + font-weight/style rules (`N.` bold, `N.N.` italic, `N.N.N.` own
+  line). This generalizes to other MDPI-style review articles instead of
+  being hardcoded to this one PDF's exact heading text.
+- **Reference-list parsing** (`parse_references`) is new: the v1 pipeline
+  discarded everything after "References". Reference entries are now parsed
+  individually and keyed by citation number, cached to
+  `data/processed/references.json` alongside the FAISS index
+  (`load_references()` reloads them without rebuilding the index).
+- **Citation-aware, sentence-based chunking** (`split_sentences_keep_citations`,
+  `chunk_section`) replaces `RecursiveCharacterTextSplitter`-based
+  character chunking. Chunks are built sentence-by-sentence up to a soft
+  character cap, and `[12,45]`-style citation markers are protected during
+  sentence splitting so a marker is never divided across two chunks. Each
+  chunk records which reference numbers it cites (`cited_refs` metadata).
+- **Hyphenation rejoining moved earlier** (`join_lines_dehyphenated`): done
+  at line-join time, when the original `-` + line-break pattern is still
+  visible, rather than as a regex pass over already-collapsed text (where
+  it could never match).
+- **`generate_answer()` extended** to resolve any `cited_refs` on the
+  retrieved chunks back to their full reference text (via the optional
+  `references` argument) and append them to the answer, in both the OpenAI
+  and extractive-fallback paths.
+- **`src/app.py` extended** to load the cached reference list at startup and
+  pass it to `generate_answer()`; the sources panel now also shows which
+  reference numbers each retrieved passage cites.
+
+### Files modified
+- `src/pipeline.py` — extraction, heading detection, section building,
+  reference parsing, and chunking rewritten per above;
+  `build_documents()`/`get_retriever()` updated to the new pipeline;
+  `generate_answer()` extended with reference resolution. `evaluate_retrieval()`
+  is unchanged.
+- `src/app.py` — loads and passes the parsed reference list; sources panel
+  shows cited reference numbers per passage.
+- `notebooks/fibromyalgia_rag_pipeline.ipynb` — regenerated to document the
+  v2 pipeline end-to-end (layout-aware extraction through citation-resolved
+  generation), replacing the v1 walkthrough. No functionality was dropped;
+  retrieval evaluation and answer generation (with the new citation
+  resolution) are both preserved.
+- `README.md` — Overview, Results, Limitations, and the Gradio usage section
+  updated to describe the v2 pipeline instead of the fixed-heading,
+  character-based v1 approach.
+- `.gitignore` — broadened `data/processed/faiss_index/` to `data/processed/`
+  so the new cached `references.json` is also git-ignored, matching the
+  README's stated intent that the whole `data/processed/` folder is a
+  runtime-generated cache.
+
+### Files removed
+- Root-level `app.py` and `pipeline.py` — these were stale, undocumented
+  duplicates of `src/app.py`/`src/pipeline.py` (identical apart from one
+  `demo.launch()` argument), not referenced anywhere in the README's
+  documented project structure. Left in place, they would have silently
+  diverged from the v2 pipeline logic in `src/`, so they were removed as
+  part of resolving this duplication rather than updated in parallel. This
+  predates the v2 integration; it is called out here because leaving a
+  stale, un-synced duplicate would have been actively misleading.
+
+### Dependencies
+- No new dependencies were required. `pymupdf` (imported as `fitz`) was
+  already a project dependency and is the only library the v2 parsing logic
+  needs beyond the Python standard library (`json` was already in the
+  standard library and needed no new entry in `requirements.txt`).
+
+### Testing
+- The notebook (`fibromyalgia_rag.ipynb`) was analyzed only as a reference
+  and was **not** added to the project; its logic was reimplemented in
+  `src/pipeline.py`.
+- All pure-Python logic that doesn't require PyMuPDF or a live embedding
+  model — `join_lines_dehyphenated`, `detect_headings`, `build_sections`,
+  `split_sentences_keep_citations`, `extract_citation_numbers`,
+  `chunk_section`, `build_documents` (including its page-number regression
+  assertion), `generate_answer`'s citation-resolution logic (both the
+  OpenAI and extractive-fallback paths), and `evaluate_retrieval` — was
+  exercised end-to-end against synthetic inputs in this sandbox and passed.
+- `src/pipeline.py` and `src/app.py` were syntax-checked (`ast.parse`), as
+  was every code cell of the regenerated notebook.
+- **Not tested in this environment**: `extract_lines`/`parse_references`
+  against the real PDF, and the embedding/FAISS/OpenAI paths, because this
+  sandbox has no network egress and PyMuPDF/langchain/faiss could not be
+  installed (same restriction noted in Section 7/7b above). These code
+  paths are carried over from the notebook largely as-is (the parsing
+  regexes/logic are unchanged from what the notebook author already
+  validated against the real PDF, per that notebook's own printed output
+  — e.g. reference-count and lowercase-surname checks). Please run
+  `python src/app.py` or the notebook once on a machine with normal
+  internet access to confirm end-to-end before relying on it.
+
+### Remaining limitations
+- As above: the real PDF extraction/reference-parsing and the live
+  embedding/OpenAI paths are unverified in this sandbox; verify on a
+  machine with network access.
+- Heading detection assumes the specific bold/italic typographic convention
+  observed in this article; a review article that numbers sections
+  differently (or doesn't bold/italicize headings) would need adapted
+  detection rules.
+- `generate_answer()`'s citation resolution only surfaces references cited
+  by the *retrieved* chunks — it does not verify that the LLM's generated
+  answer actually discusses those citations correctly; this is the same
+  "no faithfulness metric" limitation noted in Section 8 above, now
+  extended to citations.

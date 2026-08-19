@@ -21,10 +21,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gradio as gr
-from pipeline import generate_answer, get_retriever
+from pipeline import generate_answer, get_retriever, load_references
 
 print("Loading / building the retrieval index (first run may take a minute)...")
 retriever = get_retriever(k=3)
+references = load_references()
 print("Ready.")
 
 
@@ -32,12 +33,16 @@ def answer_question(question: str):
     if not question or not question.strip():
         return "من فضلك اكتب سؤال أولاً.", ""
 
-    answer, docs = generate_answer(question, retriever)
+    answer, docs = generate_answer(question, retriever, references=references)
 
-    sources_md = "\n\n".join(
-        f"**[{i}] Section: {d.metadata['section']}**\n\n{d.page_content}"
-        for i, d in enumerate(docs, 1)
-    )
+    def _format_source(i: int, d) -> str:
+        header = f"**[{i}] Section: {d.metadata['section']}**"
+        cited = d.metadata.get("cited_refs")
+        if cited:
+            header += f"  \nCites: {', '.join(f'[{n}]' for n in cited)}"
+        return f"{header}\n\n{d.page_content}"
+
+    sources_md = "\n\n".join(_format_source(i, d) for i, d in enumerate(docs, 1))
     return answer, sources_md
 
 

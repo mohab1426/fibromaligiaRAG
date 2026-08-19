@@ -10,20 +10,29 @@ Cueto-Ureña, Ramírez-Expósito & Martínez-Martos, 2024, *Biomedicines* 12(7),
 
 Given the source PDF, the pipeline:
 
-1. Extracts raw text from every page (PyMuPDF).
-2. Cleans the text — de-hyphenates words broken across line breaks, strips
-   the repeated journal header/footer, DOI, and journal URL boilerplate.
-3. Splits the article into its 7 top-level sections (Introduction,
-   Epidemiology, Physiopathology, Etiopathogenesis, Diagnosis, Treatment,
-   Conclusions).
-4. Chunks each section into overlapping ~1000-character passages.
-5. Embeds the chunks with a sentence-transformer model and indexes them in a
+1. Extracts PDF lines with layout/font metadata (PyMuPDF), instead of flat
+   text, so headings can be detected by how they're typeset.
+2. Detects numbered section headings (`N.` bold, `N.N.` italic, `N.N.N.` on
+   its own line) from that typography rather than a hardcoded list of
+   heading strings — this generalizes to other MDPI-style review articles
+   using the same numbering convention.
+3. Builds each section's text, rejoining words hyphenated across a line
+   break at the point where the hyphen is still visible.
+4. Parses the article's reference list into individually addressable
+   entries, keyed by citation number, so an in-text `[N]` marker can be
+   resolved back to its source.
+5. Chunks each section sentence-by-sentence up to a soft character cap,
+   protecting `[12,45]`-style citation markers so a chunk never splits a
+   sentence or a citation marker; each chunk records the reference numbers
+   it cites.
+6. Embeds the chunks with a sentence-transformer model and indexes them in a
    FAISS vector store.
-6. Retrieves the top-K chunks for a question and scores retrieval quality
+7. Retrieves the top-K chunks for a question and scores retrieval quality
    with a small Precision@K keyword benchmark.
-7. Generates a grounded answer from the retrieved chunks — via the OpenAI API
+8. Generates a grounded answer from the retrieved chunks — via the OpenAI API
    if a key is configured, or via a template-based extractive fallback
-   otherwise, so the notebook runs end-to-end without any secret.
+   otherwise — and resolves any cited reference numbers back to their full
+   citation text, so the notebook/app run end-to-end without any secret.
 
 ## Objectives
 
@@ -80,7 +89,8 @@ project/
 ├── data/
 │   ├── raw/
 │   │   └── biomedicines-12-01543.pdf
-│   └── processed/          # generated at runtime (FAISS index); git-ignored
+│   └── processed/          # generated at runtime (FAISS index +
+│                           # parsed reference list); git-ignored
 │
 ├── outputs/                # reserved for exported answers/reports, if any
 │
@@ -130,9 +140,10 @@ python src/app.py
   cached index and start instantly.
 - Open the local URL Gradio prints (typically `http://127.0.0.1:7860`).
 - Type a question, hit **Ask**, and you'll get the generated answer plus the
-  retrieved source passages underneath, labeled by article section.
+  retrieved source passages underneath, labeled by article section and, when
+  applicable, the reference numbers each passage cites.
 - Works with or without `OPENAI_API_KEY` set, exactly like the notebook's
-  generation step (Section 8) — the app header shows which mode is active.
+  generation step (Section 10) — the app header shows which mode is active.
 
 To share the interface temporarily (e.g. for a demo), pass `share=True`:
 
@@ -142,17 +153,18 @@ demo.launch(share=True)  # edit the last line of src/app.py
 
 ## Results
 
-- The article parses cleanly into its 7 sections with no leftover PDF
-  artifacts (hyphenation, running headers, page numbers).
-- Chunking (chunk size 1000, overlap 150) produces 70 chunks with **zero**
-  leftover `"N of 22"` page-number artifacts (verified with a regression
-  assertion in the notebook).
+- The article's numbered section headings are detected from PDF layout/font
+  metadata (not a hardcoded heading list), and the reference list is parsed
+  into individually addressable entries.
+- Chunking is sentence- and citation-aware: chunks never split a sentence or
+  a `[N]`/`[N,M]` citation marker, and a regression assertion guards against
+  leftover `"N of 22"` page-number artifacts surviving into a chunk.
 - A 3-question Precision@K retrieval benchmark is included as a smoke test;
   the exact score is printed when the notebook is run and depends on the
   embedding model's live output, so it is not hard-coded here.
 - The RAG loop is complete end-to-end: retrieval feeds into an answer
-  generation step, which was missing in the original notebook (see
-  [`docs/modifications.md`](docs/modifications.md)).
+  generation step that also resolves any cited reference numbers back to
+  their full citation text (see [`docs/modifications.md`](docs/modifications.md)).
 
 ## Conclusion
 
@@ -166,9 +178,9 @@ benchmark.
 
 - The corpus is a single article; the retrieval evaluation is a 3-question
   smoke test, not a statistically powered benchmark.
-- Section parsing matches the exact numbered heading text used in this
-  article and would need adapting for articles with a different heading
-  scheme.
+- Heading detection assumes the `N.` (bold) / `N.N.` (italic) / `N.N.N.`
+  numbering-and-typography convention used by this article; a differently
+  typeset article would need its own font/style rules.
 - Full LLM-based generation requires an OpenAI API key (not included, and
   never committed to this repository). Without one, generation degrades to
   an extractive summary of the retrieved context.
